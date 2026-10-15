@@ -1,0 +1,12 @@
+# Only src/ and the top-level project files are tracked; everything else is ignored.
+/*
+!/.gitignore
+!/README.md
+!/Makefile
+!/build.bat
+!/src/
+
+# Build output
+*.o
+*.exe
+planeforge

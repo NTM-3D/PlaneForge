@@ -1,0 +1,31 @@
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     0,1,0,0
+ PRODUCTVERSION  0,1,0,0
+ FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+ FILEFLAGS       0x0L
+ FILEOS          VOS_NT_WINDOWS32
+ FILETYPE        VFT_APP
+ FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "NTM-3D"
+            VALUE "FileDescription",  "PlaneForge 3D-plane offset-metadata toolkit"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "planeforge"
+            VALUE "OriginalFilename", "PlaneForge_v0.1.exe"
+            VALUE "ProductName",      "PlaneForge"
+            VALUE "ProductVersion",   "0.1"
+            VALUE "LegalCopyright",   "NTM-3D"
+            VALUE "Author",           "NTM-3D"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 0x4b0
+    END
+END
