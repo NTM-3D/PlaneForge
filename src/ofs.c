@@ -74,6 +74,8 @@ int ofs_read(const char *path, OfsPlane *out)
     out->plane_id   = b[27];          /* guid[15] */
     out->frame_rate = (b[28] >> 4) & 0x0f;
     out->drop_frame = b[28] & 0x0f;
+    memcpy(out->reserved, b + 29, 4);
+    out->start_timecode = rd32(b + 33);
 
     uint32_t nf = rd32(b + 37);
     const uint8_t *off = NULL;
@@ -108,9 +110,10 @@ int ofs_write(const char *path, const OfsPlane *p)
     memcpy(hdr, SIG, 8);
     hdr[8]  = '0'; hdr[9] = '1'; hdr[10] = '0'; hdr[11] = '0';
     memcpy(hdr + 12, p->guid, 16);
+    hdr[27] = (uint8_t)p->plane_id;     /* the plane id lives in the guid */
     hdr[28] = (uint8_t)(((p->frame_rate & 0x0f) << 4) | (p->drop_frame & 0x0f));
-    memset(hdr + 29, 0, 4);
-    memset(hdr + 33, 0, 4);
+    memcpy(hdr + 29, p->reserved, 4);
+    wr32(hdr + 33, p->start_timecode);
     wr32(hdr + 37, p->num_frames);
     wr64(hdr + 41, p->num_frames);
 

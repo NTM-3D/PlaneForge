@@ -17,6 +17,10 @@ typedef struct {
     const char *batch_job;
     const char *export_ofs;
     const char *from_ofs;
+    const char *export_json;
+    const char *from_json;
+    int ofs_to_json;
+    int json_to_ofs;
     const char *plane_spec;
 
     int analyze, dump_sei, show_empty, force, dropframe, help, version, quiet;
@@ -37,7 +41,8 @@ PF_NAME " v" PF_VERSION "\n"
 "usage: planeforge [options] <input> [output]\n"
 "\n"
 "Read, analyse and write fixed-depth or sweeping 3D-planes (offset-metadata)\n"
-"inside raw MVC streams, and interchange them with OFS 3D-Plane files.\n"
+"inside raw MVC streams, and exchange that metadata with OFS 3D-Plane files\n"
+"or with plane JSON files.  The same options serve both formats.\n"
 "\n"
 "analysis:\n"
 "  -analyze                 print an OFMD report (JSON)\n"
@@ -48,21 +53,30 @@ PF_NAME " v" PF_VERSION "\n"
 "writing:\n"
 "  -base-view FILE          base-view AVC stream (needed if input has no OFMD)\n"
 "  -plane N                 plane index 0..31\n"
-"  -depth N                 fixed depth -127..127\n"
-"  -min-depth N             sweep minimum depth -127..127\n"
-"  -max-depth N             sweep maximum depth -127..127\n"
+"  -depth N                 fixed depth -127..127 (0 is not valid)\n"
+"  -min-depth N             sweep minimum depth -127..127 (0 is not valid)\n"
+"  -max-depth N             sweep maximum depth -127..127 (0 is not valid)\n"
 "  -interval N              sweep hold interval (>0; 1 updates every frame)\n"
 "  -batch-job FILE          JSON batch job (array of entries)\n"
-"  -force                   overwrite the output file if it exists\n"
+"  -force                   overwrite the output file; also allow depth 0\n"
 "\n"
-"OFS interchange:\n"
+"export:\n"
 "  -export-ofs DIR          export planes to 3D-Plane-NN.ofs files in DIR\n"
-"  -plane N                 export only plane N\n"
+"  -export-json PATH        export planes to plane JSON; a .json file holds\n"
+"                           every plane, a directory holds one file per plane\n"
+"  -plane N                 with export, write only plane N\n"
 "  -fps N                   frame rate for export: 1..4, 6 or 7\n"
-"  -dropframe               mark exported plane as drop-frame (fps 4 only)\n"
+"  -dropframe               mark exported planes as drop-frame (fps 4 only)\n"
+"\n"
+"import:\n"
 "  -from-ofs PATH           import OFS file or directory into the MVC output\n"
-"  -plane N|A-B|A,B,...     import into the given plane(s)\n"
+"  -from-json PATH          import plane JSON into the MVC output\n"
+"  -plane N|A-B|A,B,...     with import, choose the target plane(s)\n"
 "  -override-depth N        depth -127..127 used to resolve frame mismatches\n"
+"\n"
+"conversion:\n"
+"  -ofs-to-json             convert the input OFS file or directory to plane JSON\n"
+"  -json-to-ofs             convert the input plane JSON to OFS file or directory\n"
 "\n"
 "misc:\n"
 "  -quiet                   suppress progress output\n"
@@ -157,189 +171,6 @@ static void jstr(FILE *o, const char *s)
         }
     }
     fputc('"', o);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
- * minimal JSON parser (arrays/objects/strings/ints/bool/null)
- * ═══════════════════════════════════════════════════════════════════════ */
-typedef enum { JV_NULL, JV_BOOL, JV_NUM, JV_STR, JV_ARR, JV_OBJ } JvType;
-
-typedef struct Jv {
-    JvType t;
-    int    b;
-    long   num;
-    char  *str;
-    struct Jv **arr;  int an;
-    char **keys; struct Jv **vals; int on;
-} Jv;
-
-typedef struct { const char *p; char *err; size_t el; } Jp;
-
-static void jerr(Jp *j, const char *msg)
-{
-    if (j->err[0] == '\0')
-        snprintf(j->err, j->el, "%s", msg);
-}
-
-static void jskip(Jp *j) { while (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r') j->p++; }
-
-static Jv *jval(Jp *j);
-
-static char *jstring_raw(Jp *j)
-{
-    if (*j->p != '"') { jerr(j, "expected string"); return NULL; }
-    j->p++;
-    size_t cap = 16, n = 0;
-    char *s = (char *)malloc(cap);
-    if (!s) pf_fatal("out of memory");
-    while (*j->p && *j->p != '"') {
-        unsigned char c = (unsigned char)*j->p++;
-        if (c == '\\') {
-            char e = *j->p++;
-            switch (e) {
-            case '"': c = '"'; break;
-            case '\\': c = '\\'; break;
-            case '/': c = '/'; break;
-            case 'b': c = '\b'; break;
-            case 'f': c = '\f'; break;
-            case 'n': c = '\n'; break;
-            case 'r': c = '\r'; break;
-            case 't': c = '\t'; break;
-            case 'u': {
-                unsigned v = 0;
-                for (int k = 0; k < 4; k++) {
-                    char h = *j->p++;
-                    v <<= 4;
-                    if (h >= '0' && h <= '9') v |= (unsigned)(h - '0');
-                    else if (h >= 'a' && h <= 'f') v |= (unsigned)(h - 'a' + 10);
-                    else if (h >= 'A' && h <= 'F') v |= (unsigned)(h - 'A' + 10);
-                    else { jerr(j, "bad \\u escape"); free(s); return NULL; }
-                }
-                c = (v < 0x80) ? (unsigned char)v : '?';
-                break;
-            }
-            default: jerr(j, "bad escape"); free(s); return NULL;
-            }
-        }
-        if (n + 1 >= cap) { cap *= 2; s = (char *)realloc(s, cap); if (!s) pf_fatal("out of memory"); }
-        s[n++] = (char)c;
-    }
-    if (*j->p != '"') { jerr(j, "unterminated string"); free(s); return NULL; }
-    j->p++;
-    s[n] = '\0';
-    return s;
-}
-
-static Jv *jval(Jp *j)
-{
-    jskip(j);
-    Jv *v = (Jv *)calloc(1, sizeof(Jv));
-    if (!v) pf_fatal("out of memory");
-    char c = *j->p;
-    if (c == '{') {
-        v->t = JV_OBJ;
-        j->p++;
-        jskip(j);
-        int cap = 0;
-        if (*j->p == '}') { j->p++; return v; }
-        for (;;) {
-            jskip(j);
-            char *k = jstring_raw(j);
-            if (!k) { free(v); return NULL; }
-            jskip(j);
-            if (*j->p != ':') { jerr(j, "expected ':'"); free(k); free(v); return NULL; }
-            j->p++;
-            Jv *val = jval(j);
-            if (!val) { free(k); free(v); return NULL; }
-            if (v->on == cap) { cap = cap ? cap * 2 : 4;
-                v->keys = (char **)realloc(v->keys, sizeof(char *) * cap);
-                v->vals = (Jv **)realloc(v->vals, sizeof(Jv *) * cap);
-                if (!v->keys || !v->vals) pf_fatal("out of memory"); }
-            v->keys[v->on] = k;
-            v->vals[v->on] = val;
-            v->on++;
-            jskip(j);
-            if (*j->p == ',') { j->p++; continue; }
-            if (*j->p == '}') { j->p++; break; }
-            jerr(j, "expected ',' or '}'");
-            return v; /* partial; error is set */
-        }
-    } else if (c == '[') {
-        v->t = JV_ARR;
-        j->p++;
-        jskip(j);
-        int cap = 0;
-        if (*j->p == ']') { j->p++; return v; }
-        for (;;) {
-            Jv *el = jval(j);
-            if (!el) { free(v); return NULL; }
-            if (v->an == cap) { cap = cap ? cap * 2 : 4;
-                v->arr = (Jv **)realloc(v->arr, sizeof(Jv *) * cap);
-                if (!v->arr) pf_fatal("out of memory"); }
-            v->arr[v->an++] = el;
-            jskip(j);
-            if (*j->p == ',') { j->p++; continue; }
-            if (*j->p == ']') { j->p++; break; }
-            jerr(j, "expected ',' or ']'");
-            return v;
-        }
-    } else if (c == '"') {
-        v->t = JV_STR;
-        v->str = jstring_raw(j);
-        if (!v->str) { free(v); return NULL; }
-    } else if (c == 't' && strncmp(j->p, "true", 4) == 0) {
-        v->t = JV_BOOL; v->b = 1; j->p += 4;
-    } else if (c == 'f' && strncmp(j->p, "false", 5) == 0) {
-        v->t = JV_BOOL; v->b = 0; j->p += 5;
-    } else if (c == 'n' && strncmp(j->p, "null", 4) == 0) {
-        v->t = JV_NULL; j->p += 4;
-    } else if (c == '-' || (c >= '0' && c <= '9')) {
-        char *end = NULL;
-        errno = 0;
-        long n = strtol(j->p, &end, 10);
-        if (end == j->p) { jerr(j, "bad number"); free(v); return NULL; }
-        if (*end == '.' || *end == 'e' || *end == 'E') { jerr(j, "non-integer number"); free(v); return NULL; }
-        v->t = JV_NUM; v->num = n; j->p = end;
-    } else {
-        jerr(j, "unexpected token");
-        free(v);
-        return NULL;
-    }
-    return v;
-}
-
-static Jv *json_parse(const char *text, char *err, size_t el)
-{
-    Jp j = { text, err, el };
-    err[0] = '\0';
-    Jv *v = jval(&j);
-    if (!v) return NULL;
-    jskip(&j);
-    if (*j.p != '\0') { jerr(&j, "trailing data"); return v; } /* caller may still reject */
-    return v;
-}
-
-static Jv *jget(const Jv *o, const char *k)
-{
-    if (!o || o->t != JV_OBJ) return NULL;
-    for (int i = 0; i < o->on; i++)
-        if (strcmp(o->keys[i], k) == 0) return o->vals[i];
-    return NULL;
-}
-
-static void json_free(Jv *v)
-{
-    if (!v) return;
-    if (v->t == JV_STR) free(v->str);
-    if (v->t == JV_ARR) {
-        for (int i = 0; i < v->an; i++) json_free(v->arr[i]);
-        free(v->arr);
-    }
-    if (v->t == JV_OBJ) {
-        for (int i = 0; i < v->on; i++) { free(v->keys[i]); json_free(v->vals[i]); }
-        free(v->keys); free(v->vals);
-    }
-    free(v);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -469,12 +300,13 @@ static int cmd_set(const Options *o)
         pf_fatal("plane must be 0..%d", MAX_PLANES - 1);
     if (o->depth < -MAX_OFFSET || o->depth > MAX_OFFSET)
         pf_fatal("depth must be -%d..%d", MAX_OFFSET, MAX_OFFSET);
+    int depth = pf_depth_value(o->depth, o->force, "-depth");
     if (file_exists(o->output) && !o->force)
         pf_fatal("output exists: %s (use -force)", o->output);
 
     PlaneSource *sources[MAX_PLANES];
     memset(sources, 0, sizeof(sources));
-    sources[o->plane] = src_static(o->depth);
+    sources[o->plane] = src_static(depth);
 
     WriteStats st;
     memset(&st, 0, sizeof(st));
@@ -486,7 +318,7 @@ static int cmd_set(const Options *o)
     jstr(stdout, o->output);
     printf(",\n");
     printf("  \"plane\": %d,\n", o->plane);
-    printf("  \"depth\": %d,\n", o->depth);
+    printf("  \"depth\": %d,\n", depth);
     printf("  \"ofmd_modified\": %lld,\n", st.messages_modified);
     printf("  \"gops_injected\": %lld,\n", st.injected_gops);
     printf("  \"created\": %s\n", st.planes_created > 0 ? "true" : "false");
@@ -503,6 +335,10 @@ static int cmd_sweep(const Options *o)
     if (o->min_depth < -MAX_OFFSET || o->min_depth > MAX_OFFSET ||
         o->max_depth < -MAX_OFFSET || o->max_depth > MAX_OFFSET)
         pf_fatal("depths must be -%d..%d", MAX_OFFSET, MAX_OFFSET);
+    int min_depth = pf_depth_value(o->min_depth, o->force, "-min-depth");
+    int max_depth = pf_depth_value(o->max_depth, o->force, "-max-depth");
+    if (min_depth > max_depth)
+        pf_fatal("min depth %d is above max depth %d", min_depth, max_depth);
     if (o->interval <= 0)
         pf_fatal("interval must be > 0");
     if (file_exists(o->output) && !o->force)
@@ -523,7 +359,7 @@ static int cmd_sweep(const Options *o)
 
     PlaneSource *sources[MAX_PLANES];
     memset(sources, 0, sizeof(sources));
-    sources[o->plane] = src_sweep(o->min_depth, o->max_depth, o->interval);
+    sources[o->plane] = src_sweep(min_depth, max_depth, o->interval);
 
     WriteStats st;
     memset(&st, 0, sizeof(st));
@@ -537,8 +373,8 @@ static int cmd_sweep(const Options *o)
     printf(",\n");
     printf("  \"plane\": %d,\n", o->plane);
     printf("  \"mode\": \"sweep\",\n");
-    printf("  \"min_depth\": %d,\n", o->min_depth);
-    printf("  \"max_depth\": %d,\n", o->max_depth);
+    printf("  \"min_depth\": %d,\n", min_depth);
+    printf("  \"max_depth\": %d,\n", max_depth);
     printf("  \"interval\": %d,\n", o->interval);
     printf("  \"total_frames\": %lld,\n", tf);
     printf("  \"ofmd_modified\": %lld,\n", st.messages_modified);
@@ -558,34 +394,10 @@ typedef struct {
     int min, max, interval;
 } BatchEnt;
 
-static char *read_file(const char *path, size_t *out_len)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) pf_fatal("cannot read '%s'", path);
-#ifdef _WIN32
-    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); pf_fatal("cannot read '%s'", path); }
-    long long sz = _ftelli64(f);
-#else
-    if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); pf_fatal("cannot read '%s'", path); }
-    long long sz = (long long)ftello(f);
-#endif
-    if (sz < 0) { fclose(f); pf_fatal("cannot read '%s'", path); }
-    rewind(f);
-    char *b = (char *)malloc((size_t)sz + 1);
-    if (!b) pf_fatal("out of memory");
-    if (sz > 0 && fread(b, 1, (size_t)sz, f) != (size_t)sz) {
-        free(b); fclose(f); pf_fatal("short read on '%s'", path);
-    }
-    b[sz] = '\0';
-    fclose(f);
-    *out_len = (size_t)sz;
-    return b;
-}
-
-static int parse_batch(const char *path, BatchEnt *ents, int *out_n)
+static int parse_batch(const char *path, BatchEnt *ents, int *out_n, int force)
 {
     size_t len = 0;
-    char *txt = read_file(path, &len);
+    char *txt = pf_read_file(path, &len);
     const char *p = txt;
     if (len >= 3 && (unsigned char)p[0] == 0xEF &&
         (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF)
@@ -628,7 +440,7 @@ static int parse_batch(const char *path, BatchEnt *ents, int *out_n)
             if (dp->num < -MAX_OFFSET || dp->num > MAX_OFFSET) pf_fatal("batch job error: entry %d depth out of range", i + 1);
             be->mode = 0;
             be->plane = (int)pl->num;
-            be->depth = (int)dp->num;
+            be->depth = pf_depth_value((int)dp->num, force, "batch job depth");
         } else if (strcmp(t->str, "sweep") == 0) {
             if (e->on != 5)
                 pf_fatal("batch job error: entry %d must have keys type, plane, min-depth, max-depth, interval", i + 1);
@@ -645,8 +457,8 @@ static int parse_batch(const char *path, BatchEnt *ents, int *out_n)
             if (iv->num < 1) pf_fatal("batch job error: entry %d interval < 1", i + 1);
             be->mode = 1;
             be->plane = (int)pl->num;
-            be->min = (int)mn->num;
-            be->max = (int)mx->num;
+            be->min = pf_depth_value((int)mn->num, force, "batch job min-depth");
+            be->max = pf_depth_value((int)mx->num, force, "batch job max-depth");
             be->interval = (int)iv->num;
         } else {
             pf_fatal("batch job error: entry %d bad type '%s'", i + 1, t->str);
@@ -668,7 +480,7 @@ static int cmd_batch(const Options *o)
 {
     BatchEnt ents[MAX_PLANES];
     int n = 0;
-    parse_batch(o->batch_job, ents, &n);
+    parse_batch(o->batch_job, ents, &n, o->force);
 
     if (file_exists(o->output) && !o->force)
         pf_fatal("output exists: %s (use -force)", o->output);
@@ -731,7 +543,7 @@ static int takes_value(const char *name)
     static const char *with_val[] = {
         "report", "base-view", "batch-job", "plane", "depth",
         "min-depth", "max-depth", "interval", "export-ofs", "fps",
-        "from-ofs", "override-depth", NULL
+        "from-ofs", "override-depth", "export-json", "from-json", NULL
     };
     for (int i = 0; with_val[i]; i++)
         if (strcmp(name, with_val[i]) == 0) return 1;
@@ -792,6 +604,10 @@ int main(int argc, char **argv)
             else if (strcmp(name, "batch-job") == 0)   o.batch_job = val;
             else if (strcmp(name, "export-ofs") == 0)  o.export_ofs = val;
             else if (strcmp(name, "from-ofs") == 0)    o.from_ofs = val;
+            else if (strcmp(name, "export-json") == 0) o.export_json = val;
+            else if (strcmp(name, "from-json") == 0)   o.from_json = val;
+            else if (strcmp(name, "ofs-to-json") == 0) o.ofs_to_json = 1;
+            else if (strcmp(name, "json-to-ofs") == 0) o.json_to_ofs = 1;
             else if (strcmp(name, "plane") == 0) {
                 o.plane_spec = val; o.have_plane = 1;
                 if (is_plain_int(val)) o.plane = (int)parse_int(val, "-plane");
@@ -834,12 +650,41 @@ int main(int argc, char **argv)
             pf_fatal("-override-depth is only valid with -from-ofs");
         return cmd_export(o.input, o.export_ofs,
                           o.have_fps ? o.fps : 0, o.have_fps, o.dropframe,
-                          o.have_plane, o.plane);
+                          o.have_plane, o.plane, o.force);
     }
 
-    if (o.from_ofs) {
+    if (o.export_json) {
+        if (o.plane_is_list)
+            pf_fatal("-plane for -export-json must be a single index");
+        if (o.have_fps && o.fps != 1 && o.fps != 2 && o.fps != 3 &&
+            o.fps != 4 && o.fps != 6 && o.fps != 7)
+            pf_fatal("-fps must be 1, 2, 3, 4, 6 or 7");
+        if (o.have_override)
+            pf_fatal("-override-depth is only valid with -from-ofs or -from-json");
+        return cmd_export_json(o.input, o.export_json,
+                               o.have_fps ? o.fps : 0, o.have_fps, o.dropframe,
+                               o.have_plane, o.plane, o.force);
+    }
+
+    if (o.ofs_to_json) {
+        if (o.have_plane || o.have_fps || o.dropframe || o.have_override)
+            pf_fatal("-ofs-to-json takes no plane, fps or depth options");
         if (!o.output)
-            pf_fatal("output file required with -from-ofs");
+            pf_fatal("output path required with -ofs-to-json");
+        return cmd_ofs_to_json(o.input, o.output, o.force);
+    }
+
+    if (o.json_to_ofs) {
+        if (o.have_plane || o.have_fps || o.dropframe || o.have_override)
+            pf_fatal("-json-to-ofs takes no plane, fps or depth options");
+        if (!o.output)
+            pf_fatal("output path required with -json-to-ofs");
+        return cmd_json_to_ofs(o.input, o.output, o.force);
+    }
+
+    if (o.from_ofs || o.from_json) {
+        if (!o.output)
+            pf_fatal("output file required with -from-ofs/-from-json");
         if (o.have_override &&
             (o.override_depth < -MAX_OFFSET || o.override_depth > MAX_OFFSET))
             pf_fatal("-override-depth must be -%d..%d", MAX_OFFSET, MAX_OFFSET);
@@ -847,16 +692,20 @@ int main(int argc, char **argv)
             pf_fatal("-fps/-dropframe apply to export only");
         if (o.have_depth || o.have_min || o.have_max || o.have_interval ||
             o.batch_job)
-            pf_fatal("-from-ofs cannot be combined with depth/sweep/batch options");
+            pf_fatal("import cannot be combined with depth/sweep/batch options");
 
         int targets[MAX_PLANES];
         int ntargets = 0;
         if (o.have_plane)
             ntargets = parse_plane_spec(o.plane_spec, targets, MAX_PLANES);
 
+        if (o.from_json)
+            return cmd_import_json(o.input, o.output, o.from_json,
+                                   o.have_override, o.override_depth,
+                                   o.base_view, targets, ntargets, o.force);
         return cmd_import(o.input, o.output, o.from_ofs,
                           o.have_override, o.override_depth, o.base_view,
-                          targets, ntargets);
+                          targets, ntargets, o.force);
     }
 
     if (!o.output)

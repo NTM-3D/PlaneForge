@@ -5,6 +5,13 @@
 #include <string.h>
 #include <stdarg.h>
 
+#include <sys/stat.h>
+#ifdef _WIN32
+#  include <direct.h>
+#else
+#  include <sys/types.h>
+#endif
+
 /* ── diagnostics ───────────────────────────────────────────────────── */
 void pf_fatal(const char *fmt, ...)
 {
@@ -25,6 +32,115 @@ void pf_warn(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
+}
+
+/* ── file helpers ──────────────────────────────────────────────────── */
+static void pf_mkdir_one(const char *path)
+{
+#ifdef _WIN32
+    if (_mkdir(path) == 0)
+        return;
+#else
+    if (mkdir(path, 0755) == 0)
+        return;
+#endif
+    if (pf_is_dir(path))
+        return;
+    pf_fatal("cannot create output directory '%s'", path);
+}
+
+char *pf_read_file(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) pf_fatal("cannot read '%s'", path);
+#ifdef _WIN32
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); pf_fatal("cannot read '%s'", path); }
+    long long sz = _ftelli64(f);
+#else
+    if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); pf_fatal("cannot read '%s'", path); }
+    long long sz = (long long)ftello(f);
+#endif
+    if (sz < 0) { fclose(f); pf_fatal("cannot read '%s'", path); }
+    rewind(f);
+    char *b = (char *)malloc((size_t)sz + 1);
+    if (!b) pf_fatal("out of memory");
+    if (sz > 0 && fread(b, 1, (size_t)sz, f) != (size_t)sz) {
+        free(b);
+        fclose(f);
+        pf_fatal("short read on '%s'", path);
+    }
+    b[sz] = '\0';
+    fclose(f);
+    *out_len = (size_t)sz;
+    return b;
+}
+
+void pf_ensure_dir(const char *path)
+{
+    char tmp[4096];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    size_t n = strlen(tmp);
+    while (n > 0 && (tmp[n - 1] == '/' || tmp[n - 1] == '\\'))
+        tmp[--n] = '\0';
+    if (n == 0) return;
+
+    for (size_t i = 1; i < n; i++) {
+        if (tmp[i] != '/' && tmp[i] != '\\') continue;
+        char save = tmp[i];
+        tmp[i] = '\0';
+        if (tmp[i - 1] != ':') {
+            if (!pf_is_dir(tmp))
+                pf_mkdir_one(tmp);
+        }
+        tmp[i] = save;
+    }
+    if (!pf_is_dir(tmp))
+        pf_mkdir_one(tmp);
+}
+
+void pf_ensure_parent_dir(const char *path)
+{
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *sep = NULL;
+    for (char *q = dir; *q; q++)
+        if (*q == '/' || *q == '\\') sep = q;
+    if (!sep) return;
+    *sep = '\0';
+    if (dir[0] == '\0') return;
+    pf_ensure_dir(dir);
+}
+
+void pf_join_path(char *dst, size_t cap, const char *dir, const char *name)
+{
+    size_t n = strlen(dir);
+    int sep = (n > 0 && (dir[n - 1] == '/' || dir[n - 1] == '\\')) ? 0 : 1;
+    snprintf(dst, cap, "%s%s%s", dir, sep ? "/" : "", name);
+}
+
+int pf_is_dir(const char *path)
+{
+#ifdef _WIN32
+    struct _stat64 st;
+    return _stat64(path, &st) == 0 && (st.st_mode & _S_IFDIR);
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+int pf_path_has_ext(const char *path, const char *ext)
+{
+    size_t n = strlen(path), m = strlen(ext);
+    if (n < m) return 0;
+    const char *p = path + n - m;
+    for (size_t i = 0; i < m; i++) {
+        int a = p[i], b = ext[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
 }
 
 /* ── start-code scanning ───────────────────────────────────────────── */

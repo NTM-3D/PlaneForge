@@ -11,13 +11,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "version.h"
+
 #define PF_NAME    "PlaneForge"
-#define PF_VERSION "0.1"
 
 /* NAL unit types (H.264 / MVC) */
 #define NAL_SLICE  1
 #define NAL_IDR    5
 #define NAL_SEI    6
+#define NAL_TYPE_AUD 9
 #define NAL_TYPE24 24
 
 /* OFMD offset-metadata ------------------------------------------------ */
@@ -30,6 +32,10 @@
 /* OFS 3D-Plane files -------------------------------------------------- */
 #define OFS_HEADER   41       /* canonical header size                    */
 #define OFS_SIGNATURE { 0x89,'O','F','S',0x0d,0x0a,0x1a,0x0a }
+
+/* JSON plane interchange ----------------------------------------------- */
+#define PJSON_FORMAT  "planeforge-planes"
+#define PJSON_VERSION 1
 
 /* ── error helpers ─────────────────────────────────────────────────── */
 #if defined(__GNUC__)
@@ -190,18 +196,95 @@ typedef struct {
     int      plane_id;
     uint32_t num_frames;
     uint8_t *offsets;       /* num_frames bytes                        */
+    uint8_t  reserved[4];   /* OFS bytes 29..32                        */
+    uint32_t start_timecode;/* OFS bytes 33..36                        */
 } OfsPlane;
 
 int  ofs_read(const char *path, OfsPlane *out);      /* 0 on success    */
 int  ofs_write(const char *path, const OfsPlane *p); /* 0 on success    */
 void ofs_free(OfsPlane *p);
 
+/* ── depth bytes ───────────────────────────────────────────────────── */
+/* One byte per frame: 0x80 = 0, 0x01..0x7f = +1..+127, 0x81..0xff = -1..-127. */
+uint8_t pf_depth_to_byte(int d);
+int     pf_byte_to_depth(uint8_t b);
+
+/* Depth 0 is not a valid 3D-plane depth: it marks an empty plane.  Checks a
+ * plane's depth bytes and, with force, rewrites every zero depth as +1.
+ * Returns the number of zero depths found. */
+long pf_depth_check(uint8_t *data, size_t n, int plane_id, int force,
+                    const char *what);
+
+/* Same rule for a single depth value: returns the depth to use, which is +1
+ * when force is set and the depth is 0. */
+int pf_depth_value(int d, int force, const char *what);
+
+/* Fill a GUID for a plane; the last byte holds the plane id. */
+void pf_make_guid(uint8_t guid[16], int plane_id);
+
+/* ── minimal JSON values ────────────────────────────────────────────── */
+typedef enum { JV_NULL, JV_BOOL, JV_NUM, JV_STR, JV_ARR, JV_OBJ } JvType;
+
+typedef struct Jv {
+    JvType t;
+    int    b;
+    long long num;
+    char  *str;
+    struct Jv **arr;  int an;
+    char **keys; struct Jv **vals; int on;
+} Jv;
+
+Jv  *json_parse(const char *text, char *err, size_t el);
+void json_free(Jv *v);
+Jv  *jget(const Jv *o, const char *k);
+
+/* ── plane sets ────────────────────────────────────────────────────── */
+/* A set of planes sharing one frame rate, drop-frame flag and frame count. */
+typedef struct {
+    OfsPlane *planes;
+    int       n;
+    int       frame_rate;
+    int       drop_frame;
+    uint32_t  num_frames;
+} PlaneSet;
+
+void planeset_free(PlaneSet *s);
+
+/* Read plane JSON from a file or a directory of per-plane files. */
+int  pjson_read(const char *path, PlaneSet *out);
+/* Write plane JSON: combined = one file with every plane, else one file
+ * per plane in the given directory. */
+int  pjson_write(const char *path, const PlaneSet *s, int combined);
+
+/* Read a whole file into a NUL-terminated buffer; caller frees. */
+char *pf_read_file(const char *path, size_t *out_len);
+
+/* Create a directory if it is missing; fatal on failure. */
+void pf_ensure_dir(const char *path);
+/* Create the directory that holds the given file. */
+void pf_ensure_parent_dir(const char *path);
+/* Join a directory and a file name with a separator. */
+void pf_join_path(char *dst, size_t cap, const char *dir, const char *name);
+/* Non-zero when the path names an existing directory. */
+int  pf_is_dir(const char *path);
+/* Non-zero when the path ends with the given extension. */
+int  pf_path_has_ext(const char *path, const char *ext);
+
 /* ── high level operations ─────────────────────────────────────────── */
 int cmd_export(const char *in_path, const char *out_dir,
                int fps_override, int have_fps, int drop_frame,
-               int have_plane, int only_plane);
+               int have_plane, int only_plane, int force);
+int cmd_export_json(const char *in_path, const char *out_path,
+                    int fps_override, int have_fps, int drop_frame,
+                    int have_plane, int only_plane, int force);
 int cmd_import(const char *in_path, const char *out_path, const char *from_ofs,
                int have_override, int override_depth, const char *base_view,
-               const int *targets, int ntargets);
+               const int *targets, int ntargets, int force);
+int cmd_import_json(const char *in_path, const char *out_path,
+                    const char *from_json,
+                    int have_override, int override_depth, const char *base_view,
+                    const int *targets, int ntargets, int force);
+int cmd_ofs_to_json(const char *from_ofs, const char *out_path, int force);
+int cmd_json_to_ofs(const char *from_json, const char *out_path, int force);
 
 #endif /* PLANEFORGE_PF_H */

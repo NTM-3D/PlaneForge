@@ -5,6 +5,7 @@
 !/Makefile
 !/build.bat
 !/src/
+!/test_suite.py
 
 # Build output
 *.o
